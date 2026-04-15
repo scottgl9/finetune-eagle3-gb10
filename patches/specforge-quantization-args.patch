@@ -1,0 +1,55 @@
+diff --git a/specforge/args.py b/specforge/args.py
+index fdf9c6f..1909e6d 100644
+--- a/specforge/args.py
++++ b/specforge/args.py
+@@ -102,6 +102,8 @@ class SGLangBackendArgs:
+     sglang_ep_size: int = 1
+     sglang_max_running_requests: int = None  # assign based on batch size
+     sglang_max_total_tokens: int = None  # assign based on batch size and seq length
++    sglang_quantization: str = None  # e.g. "modelopt_fp4", "compressed-tensors", "fp8"
++    sglang_moe_runner_backend: str = None  # e.g. "flashinfer_cutlass", "triton"
+ 
+     @staticmethod
+     def add_args(parser: argparse.ArgumentParser) -> None:
+@@ -174,6 +176,18 @@ class SGLangBackendArgs:
+             default=1,
+             help="The ep size of the SGLang backend",
+         )
++        parser.add_argument(
++            "--sglang-quantization",
++            type=str,
++            default=None,
++            help="Quantization method for the target model (e.g. modelopt_fp4, compressed-tensors, fp8)",
++        )
++        parser.add_argument(
++            "--sglang-moe-runner-backend",
++            type=str,
++            default=None,
++            help="MoE runner backend for the target model (e.g. flashinfer_cutlass, triton)",
++        )
+ 
+     @staticmethod
+     def from_args(args: argparse.Namespace) -> "SGLangBackendArgs":
+@@ -198,10 +212,12 @@ class SGLangBackendArgs:
+                 if hasattr(args, "target_batch_size") and hasattr(args, "max_length")
+                 else None
+             ),
++            sglang_quantization=getattr(args, "sglang_quantization", None),
++            sglang_moe_runner_backend=getattr(args, "sglang_moe_runner_backend", None),
+         )
+ 
+     def to_kwargs(self) -> Dict[str, Any]:
+-        return dict(
++        kwargs = dict(
+             attention_backend=self.sglang_attention_backend,
+             mem_fraction_static=self.sglang_mem_fraction_static,
+             context_length=self.sglang_context_length,
+@@ -217,3 +233,8 @@ class SGLangBackendArgs:
+             max_running_requests=self.sglang_max_running_requests,
+             max_total_tokens=self.sglang_max_total_tokens,
+         )
++        if self.sglang_quantization is not None:
++            kwargs["quantization"] = self.sglang_quantization
++        if self.sglang_moe_runner_backend is not None:
++            kwargs["moe_runner_backend"] = self.sglang_moe_runner_backend
++        return kwargs

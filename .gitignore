@@ -1,0 +1,6 @@
+SpecForge/
+cache/
+outputs/
+__pycache__/
+*.pyc
+nohup.out
