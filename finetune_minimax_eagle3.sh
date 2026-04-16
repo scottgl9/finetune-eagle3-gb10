@@ -52,7 +52,7 @@ WARMUP_RATIO=0.05
 
 # SGLang serving config for hidden state extraction
 # Conservative memory split: 88% for model, 12% for training overhead
-MEM_FRACTION=0.82
+MEM_FRACTION=0.85
 
 # Resume from last checkpoint?
 RESUME="${RESUME:-0}"

@@ -53,3 +53,46 @@ index fdf9c6f..1909e6d 100644
 +        if self.sglang_moe_runner_backend is not None:
 +            kwargs["moe_runner_backend"] = self.sglang_moe_runner_backend
 +        return kwargs
+diff --git a/specforge/modeling/target/eagle3_target_model.py b/specforge/modeling/target/eagle3_target_model.py
+index eac59a7..5d04a83 100644
+--- a/specforge/modeling/target/eagle3_target_model.py
++++ b/specforge/modeling/target/eagle3_target_model.py
+@@ -319,11 +319,16 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
+             dtype=dtype_arg,
+             enable_return_hidden_states=True,
+             disable_cuda_graph=True,  # we use piecewise cuda graph for prefill instead
++            enable_fp32_lm_head=True,  # prevent NaN from BF16 lm_head on large vocab models
+             tp_size=tp_size,
+             pp_size=1,
+             **kwargs,
+         )
+ 
++        # Set global server args so LogitsProcessor picks up enable_fp32_lm_head
++        from sglang.srt.server_args import set_global_server_args_for_scheduler
++        set_global_server_args_for_scheduler(server_args)
++
+         tp_rank = dist.get_rank(get_tp_group())
+         moe_ep_rank = tp_rank // (server_args.tp_size // server_args.ep_size)
+         model_config = ModelConfig.from_server_args(server_args)
+@@ -378,12 +383,15 @@ class SGLangEagle3TargetModel(Eagle3TargetModel):
+             page_size=self.model_runner.server_args.page_size,
+         )
+         # Use SWARadixCache for models with hybrid sliding window attention (e.g., Gemma-4)
+-        from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator
+-        if isinstance(self.model_runner.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator):
+-            from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
+-            swa_size = getattr(self.model_runner.model_config.hf_text_config, 'sliding_window', 1024)
+-            tree_cache = SWARadixCache(cache_params, sliding_window_size=swa_size)
+-        else:
++        try:
++            from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator
++            if isinstance(self.model_runner.token_to_kv_pool_allocator, SWATokenToKVPoolAllocator):
++                from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
++                swa_size = getattr(self.model_runner.model_config.hf_text_config, 'sliding_window', 1024)
++                tree_cache = SWARadixCache(cache_params, sliding_window_size=swa_size)
++            else:
++                tree_cache = RadixCache(cache_params)
++        except ImportError:
+             tree_cache = RadixCache(cache_params)
+ 
+         batch = ScheduleBatch.init_new(

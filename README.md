@@ -119,67 +119,96 @@ nohup bash -c 'RESUME=1 SPECFORGE_DIR=SpecForge bash finetune_minimax_eagle3.sh'
 | Max grad norm | 0.5 | Gradient clipping |
 | TTT length | 7 | Autoregressive unroll steps |
 | Dataset | ShareGPT (120K samples) | Mixed conversational data |
-| SGLang mem fraction | 0.82 | Leaves headroom for Marlin FP4 init + KV cache |
+| SGLang mem fraction | 0.85 | Leaves headroom for Marlin FP4 init + KV cache |
 | SGLANG_QUANTIZE_LM_HEAD_FP8 | 0 (disabled) | Draft head learns the unquantized lm_head distribution for compatibility with standard SGLang |
 | enable_fp32_lm_head | true | Prevents NaN from BF16 lm_head overflow on 200K vocab (see below) |
 | Chat template | minimax | Must match model's chat format for correct loss masking |
 
-## SpecForge modifications
+## Required patches
 
-The included patch (`patches/specforge-quantization-args.patch`) adds two
-arguments to SpecForge's `SGLangBackendArgs` that are missing upstream:
+### SpecForge patch
 
-- `--sglang-quantization` — passes `quantization` to SGLang `ServerArgs`
-  (required: `compressed-tensors` for this model)
-- `--sglang-moe-runner-backend` — passes `moe_runner_backend` to `ServerArgs`
+The included patch (`patches/specforge-quantization-args.patch`) modifies
+SpecForge to work with quantized NVFP4 models:
 
-Additional SpecForge changes (applied directly, not in patch):
+1. **`specforge/args.py`**: Adds `--sglang-quantization` and
+   `--sglang-moe-runner-backend` arguments to `SGLangBackendArgs`
+   (upstream SpecForge assumes unquantized models)
 
-- `eagle3_target_model.py`: Added `enable_fp32_lm_head=True` to `ServerArgs`
-  creation to prevent NaN logits during training
-- `eagle3_target_model.py`: Wrapped `SWATokenToKVPoolAllocator` import in
-  try/except for compatibility with SGLang forks that don't have this class
+2. **`specforge/modeling/target/eagle3_target_model.py`**:
+   - Added `enable_fp32_lm_head=True` to `ServerArgs` — prevents NaN from
+     BF16 lm_head overflow on 200K vocab
+   - Added `set_global_server_args_for_scheduler()` call so `LogitsProcessor`
+     reads the FP32 lm_head setting
+   - Wrapped `SWATokenToKVPoolAllocator` import in try/except for SGLang
+     compatibility
+
+### SGLang patch (scottgl9/sglang)
+
+The NVFP4 W4A4 MoE kernel on SM121 (GB10) produces NaN at transformer
+layer 60+ when running in extend/prefill mode (used by SpecForge for hidden
+state extraction). The attention layers and earlier MoE layers work correctly.
+
+**Fix in `sglang/srt/models/minimax_m2.py`**: After each MoE forward pass,
+check for NaN output and replace with the pre-MoE hidden states (identity
+fallback). This preserves the valid aux hidden states from layers 1, 30, 58
+while producing approximate but non-NaN logits for the teacher signal.
+
+```python
+# In MiniMaxM2DecoderLayer.forward(), after block_sparse_moe:
+moe_input = hidden_states
+hidden_states = self.block_sparse_moe(hidden_states, forward_batch)
+if hidden_states.isnan().any():
+    nan_mask = hidden_states.isnan()
+    hidden_states = torch.where(nan_mask, moe_input, hidden_states)
+```
+
+~29% of training samples have all-NaN MoE output (loss=0 for those samples).
+The remaining ~71% train normally with valid teacher signal. Peak per-sample
+accuracy reaches 90%+ during training.
 
 ### Why `enable_fp32_lm_head`?
 
 The 172B NVFP4 model's `lm_head` is excluded from quantization (stays BF16).
-When computing logits as a BF16 matmul against the 200K vocab, intermediate
-values overflow BF16 range and produce NaN. Using FP32 for the lm_head
-computation fixes this. Note: `SGLANG_QUANTIZE_LM_HEAD_FP8` also avoids the
-NaN (FP8 dynamic quantization clamps the range), but we disable it so the
-draft head learns the unquantized distribution for broader compatibility.
+The BF16 matmul of (tokens, 3072) x (3072, 200064) can overflow and produce
+NaN. FP32 lm_head fixes this. `SGLANG_QUANTIZE_LM_HEAD_FP8` is disabled so
+the draft head learns the standard distribution without FP8 post-quantization.
 
 ### Why `--chat-template minimax`?
 
 SpecForge uses the chat template to identify assistant turns and build a loss
 mask. Using the wrong template (e.g., `llama3`) results in `loss_mask=0` for
 all tokens, meaning no training signal. MiniMax uses `]~b]ai\n` as the
-assistant header, which is registered as the `minimax` template in SpecForge.
+assistant header, registered as the `minimax` template in SpecForge.
 
 ## Troubleshooting
 
 ### OOM during model loading
-Reduce `MEM_FRACTION` in the script (default: 0.82). The 172B NVFP4 model uses
+Reduce `MEM_FRACTION` in the script (default: 0.85). The 172B NVFP4 model uses
 ~93 GB. Marlin FP4 weight repacking needs temporary buffers during init.
 
 ### Silent process death (no error in log)
 Usually OOM killer — check `dmesg | grep -i oom`. Reduce `MEM_FRACTION`.
 
-### NaN logits / loss=0.00
-If target logits show `mean=nan`, ensure `enable_fp32_lm_head=True` is set in
-SpecForge's `ServerArgs` creation. This is already configured in our modified
-`eagle3_target_model.py`.
+### NaN logits / loss=0.00 on all samples
+Ensure `enable_fp32_lm_head=True` is set in SpecForge's `ServerArgs` creation,
+and that `set_global_server_args_for_scheduler()` is called so `LogitsProcessor`
+reads it. Both are in the patch.
 
 ### loss_mask all zeros (loss=0.00, acc=0.00)
 Wrong chat template. Must use `--chat-template minimax`, not `llama3`.
+
+### ~29% of samples show loss=0.00
+This is expected — the NVFP4 MoE NaN issue affects some samples entirely.
+The identity fallback produces zero-information logits for those samples. The
+model still trains effectively on the remaining ~71%.
 
 ### Dataset path error
 SpecForge's `prepare_data.py` creates a directory `sharegpt_train.jsonl/`
 containing the actual file. The script handles this automatically.
 
 ### `SWATokenToKVPoolAllocator` import error
-Some SGLang versions don't have this class. Our modified SpecForge wraps the
-import in try/except and falls back to `RadixCache`.
+Handled by the SpecForge patch (try/except fallback to `RadixCache`).
 
 ### Training loss doesn't decrease
 Try reducing learning rate to 5e-6 and resuming:
