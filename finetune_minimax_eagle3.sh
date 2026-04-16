@@ -242,7 +242,7 @@ torchrun \
     \
     `# Dataset` \
     --train-data-path "${TRAIN_DATA}" \
-    --chat-template llama3 \
+    --chat-template minimax \
     --build-dataset-num-proc 4 \
     \
     `# Training` \

@@ -120,18 +120,41 @@ nohup bash -c 'RESUME=1 SPECFORGE_DIR=SpecForge bash finetune_minimax_eagle3.sh'
 | TTT length | 7 | Autoregressive unroll steps |
 | Dataset | ShareGPT (120K samples) | Mixed conversational data |
 | SGLang mem fraction | 0.82 | Leaves headroom for Marlin FP4 init + KV cache |
-| SGLANG_QUANTIZE_LM_HEAD_FP8 | 0 (disabled) | Gives draft head clean BF16 logits as teacher signal |
+| SGLANG_QUANTIZE_LM_HEAD_FP8 | 0 (disabled) | Draft head learns the unquantized lm_head distribution for compatibility with standard SGLang |
+| enable_fp32_lm_head | true | Prevents NaN from BF16 lm_head overflow on 200K vocab (see below) |
+| Chat template | minimax | Must match model's chat format for correct loss masking |
 
-## SpecForge patch
+## SpecForge modifications
 
-The included patch adds two arguments to SpecForge's `SGLangBackendArgs` that
-are missing upstream:
+The included patch (`patches/specforge-quantization-args.patch`) adds two
+arguments to SpecForge's `SGLangBackendArgs` that are missing upstream:
 
 - `--sglang-quantization` — passes `quantization` to SGLang `ServerArgs`
-  (required: `compressed-tensors` for NVFP4 models)
+  (required: `compressed-tensors` for this model)
 - `--sglang-moe-runner-backend` — passes `moe_runner_backend` to `ServerArgs`
 
-These are needed because upstream SpecForge assumes unquantized models.
+Additional SpecForge changes (applied directly, not in patch):
+
+- `eagle3_target_model.py`: Added `enable_fp32_lm_head=True` to `ServerArgs`
+  creation to prevent NaN logits during training
+- `eagle3_target_model.py`: Wrapped `SWATokenToKVPoolAllocator` import in
+  try/except for compatibility with SGLang forks that don't have this class
+
+### Why `enable_fp32_lm_head`?
+
+The 172B NVFP4 model's `lm_head` is excluded from quantization (stays BF16).
+When computing logits as a BF16 matmul against the 200K vocab, intermediate
+values overflow BF16 range and produce NaN. Using FP32 for the lm_head
+computation fixes this. Note: `SGLANG_QUANTIZE_LM_HEAD_FP8` also avoids the
+NaN (FP8 dynamic quantization clamps the range), but we disable it so the
+draft head learns the unquantized distribution for broader compatibility.
+
+### Why `--chat-template minimax`?
+
+SpecForge uses the chat template to identify assistant turns and build a loss
+mask. Using the wrong template (e.g., `llama3`) results in `loss_mask=0` for
+all tokens, meaning no training signal. MiniMax uses `]~b]ai\n` as the
+assistant header, which is registered as the `minimax` template in SpecForge.
 
 ## Troubleshooting
 
@@ -142,9 +165,21 @@ Reduce `MEM_FRACTION` in the script (default: 0.82). The 172B NVFP4 model uses
 ### Silent process death (no error in log)
 Usually OOM killer — check `dmesg | grep -i oom`. Reduce `MEM_FRACTION`.
 
+### NaN logits / loss=0.00
+If target logits show `mean=nan`, ensure `enable_fp32_lm_head=True` is set in
+SpecForge's `ServerArgs` creation. This is already configured in our modified
+`eagle3_target_model.py`.
+
+### loss_mask all zeros (loss=0.00, acc=0.00)
+Wrong chat template. Must use `--chat-template minimax`, not `llama3`.
+
 ### Dataset path error
 SpecForge's `prepare_data.py` creates a directory `sharegpt_train.jsonl/`
 containing the actual file. The script handles this automatically.
+
+### `SWATokenToKVPoolAllocator` import error
+Some SGLang versions don't have this class. Our modified SpecForge wraps the
+import in try/except and falls back to `RadixCache`.
 
 ### Training loss doesn't decrease
 Try reducing learning rate to 5e-6 and resuming:
