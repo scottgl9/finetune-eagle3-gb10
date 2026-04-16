@@ -1,24 +1,16 @@
 # Resuming Eagle3 Fine-Tuning
 
-## Current status (paused 2026-04-16)
+## Current status (stopped 2026-04-16)
 
-- **Training**: Epoch 0, step ~33000 / 78812 (42%)
-- **Checkpoints saved**: 16 (every 2000 steps, up to step 32000)
+- **Training**: Epoch 0, step ~33500 / 78812 (43%), **stopped**
+- **Last checkpoint**: `epoch_0_step_32000`
+- **Checkpoints saved**: 16 (every 2000 steps, step 2000 through 32000)
 - **Output dir**: `outputs/minimax-m2.5-reap172b-nvfp4-eagle3/`
 - **Total epochs**: 3 (236,436 total steps)
 - **Speed**: ~1.21s/step, ~26h per epoch
 - **Accuracy**: 40-90% on valid samples, peaks at 95%
 - **NaN samples**: ~29% of samples have loss=0 (MoE NaN issue, expected)
-
-## If training is still running
-
-The training was started with `nohup` and will continue even if the terminal
-is closed. Check if it's running:
-
-```bash
-pgrep -af "train_eagle3"
-tail -5 outputs/minimax-m2.5-reap172b-nvfp4-eagle3/train.log
-```
+- **Training will resume from step 32000** when restarted with `RESUME=1`
 
 ## If training stopped / needs to resume
 
